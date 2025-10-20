@@ -1,0 +1,30 @@
+{
+  "cppFile": "qt/generated/viewer_cxx.cpp",
+  "rust": {
+    "dir": "src/gen",
+    "interfaceModule": "viewer_interface",
+    "implementationModule": "viewer_impl"
+  },
+  "objects": {
+    "ImageViewer": {
+      "type": "Object",
+      "properties": {
+        "image_path": { "type": "QString" },
+        "display_path": { "type": "QString" },
+        "has_pending": { "type": "bool" }
+      },
+      "functions": {
+        "set_image_path": { "return": "void", "arguments": [ { "name": "path", "type": "QString" } ] },
+        "start_watcher": { "return": "void", "arguments": [ { "name": "path", "type": "QString" } ] },
+        "gray_preview": { "return": "void", "arguments": [] },
+        "save_processed": { "return": "void", "arguments": [] },
+        "refresh_display": { "return": "void", "arguments": [] },
+        "apply_threshold_mapping": { "return": "void", "arguments": [ { "name": "thresholds_json", "type": "QString" } ] },
+        "cleanup_scattered_pixels": { "return": "void", "arguments": [] },
+        "cleanup_temp_files": { "return": "void", "arguments": [] }
+      }
+    }
+  }
+}
+
+
