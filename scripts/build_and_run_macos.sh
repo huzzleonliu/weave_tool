@@ -42,8 +42,17 @@ popd >/dev/null
 
 echo "[2/3] CMake 配置与生成 (macOS + Qt5)"
 pushd "${ROOT_DIR}/qt" >/dev/null
+# 若缓存来自不同源路径，清理 build 目录以避免 CMake 源不匹配错误
+if [[ -f build/CMakeCache.txt ]]; then
+  cached_src=$(grep -E '^CMAKE_HOME_DIRECTORY:' build/CMakeCache.txt | sed -E 's/^[^=]+=//')
+  if [[ -n "$cached_src" && "$cached_src" != "$PWD" ]]; then
+    echo "检测到旧的 CMake 缓存来自: $cached_src，与当前源目录不一致，清理 qt/build..."
+    rm -rf build
+  fi
+fi
+
 cmake -S . -B build -DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}"
-cmake --build build -t gen_bindings
+cmake --build build -t gen_bindings || echo "生成绑定失败或跳过，若已存在生成文件可忽略"
 cmake --build build -j
 
 echo "[3/3] 运行应用"
