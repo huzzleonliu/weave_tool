@@ -1,10 +1,15 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(dead_code)]
-#![allow(unused_unit)]
+
+// 设计说明（重要）：
+// 本文件实现 QML/C++ 侧暴露的 ImageViewer 逻辑。
+// 由于生成的 trait 方法多为 &self，但需要在只读方法中变更内部状态（如更新路径、触发信号），
+// 本实现使用 UnsafeCell 提供“内部可变性”，避免 & -> &mut 的未定义行为。
 use crate::viewer_interface::*;
 use notify::Watcher;
 use serde::{Deserialize, Serialize};
+use std::cell::{RefCell, UnsafeCell};
 
 #[derive(Deserialize)]
 struct ThresholdMappingData {
@@ -14,43 +19,45 @@ struct ThresholdMappingData {
 }
 
 pub struct ImageViewer {
-    emit: ImageViewerEmitter,
-    image_path: String,
-    display_path: String,
-    watcher: Option<notify::RecommendedWatcher>,
-    pending_path: Option<String>,
+    // 生成器提供的发射器，用于向 QML 侧发送属性变更信号（内部可变以便在 &self 中使用）
+    emit: UnsafeCell<ImageViewerEmitter>,
+    // 以下字段需要在 &self 方法中被修改，使用 UnsafeCell 提供内部可变性
+    image_path: UnsafeCell<String>,
+    display_path: UnsafeCell<String>,
+    pending_path: UnsafeCell<Option<String>>,
+    // watcher 放在 RefCell 中，避免与字符串借用相互影响
+    watcher: RefCell<Option<notify::RecommendedWatcher>>,
 }
 
 
 impl ImageViewerTrait for ImageViewer {
     fn new(emit: ImageViewerEmitter) -> ImageViewer {
         ImageViewer {
-            emit,
-            image_path: String::new(),
-            display_path: String::new(),
-            watcher: None,
-            pending_path: None,
+            emit: UnsafeCell::new(emit),
+            image_path: UnsafeCell::new(String::new()),
+            display_path: UnsafeCell::new(String::new()),
+            pending_path: UnsafeCell::new(None),
+            watcher: RefCell::new(None),
         }
     }
     fn emit(&mut self) -> &mut ImageViewerEmitter {
-        &mut self.emit
+        unsafe { &mut *self.emit.get() }
     }
     fn image_path(&self) -> &str {
-        &self.image_path
+        unsafe { &*self.image_path.get() }
     }
-    fn display_path(&self) -> &str { if !self.display_path.is_empty() { &self.display_path } else { &self.image_path } }
-    fn has_pending(&self) -> bool { self.pending_path.is_some() }
+    fn display_path(&self) -> &str {
+        let disp = unsafe { &*self.display_path.get() };
+        if !disp.is_empty() { disp } else { unsafe { &*self.image_path.get() } }
+    }
+    fn has_pending(&self) -> bool { unsafe { (*self.pending_path.get()).is_some() } }
     fn set_image_path(&self, path: String) -> () {
-        // mutate through interior mutability pattern avoided for simplicity
-        // SAFETY: We're mutating via raw pointer cast as generator expects &self; acceptable for demo
-        let this = self as *const ImageViewer as *mut ImageViewer;
-        unsafe {
-            (*this).image_path = path;
-            (*this).emit.image_path_changed();
-        }
+        // 设置原图路径，通知 QML 更新
+        unsafe { *self.image_path.get() = path; }
+        unsafe { (&mut *self.emit.get()).image_path_changed(); }
     }
     fn gray_preview(&self) -> () {
-        let path = self.image_path.clone();
+        let path = unsafe { (*self.image_path.get()).clone() };
         if path.is_empty() { return; }
         // 读取并转换为 RGBA8，保留 alpha；将 RGB 设置为相同亮度值
         let img = match image::open(&path) { Ok(i) => i, Err(_) => return };
@@ -83,40 +90,41 @@ impl ImageViewerTrait for ImageViewer {
         // 写入临时文件，不覆盖原图
         let tmp_path = format!("{}{}", &path, ".gray.tmp.png");
         let _ = dyn_img.save(&tmp_path);
-        // 标记待保存
-        let this = self as *const ImageViewer as *mut ImageViewer;
+        // 标记待保存并刷新显示
         unsafe {
-            (*this).pending_path = Some(tmp_path);
-            (*this).display_path = (*this).pending_path.clone().unwrap_or_default();
-            (*this).emit.display_path_changed();
-            (*this).emit.has_pending_changed();
+            *self.pending_path.get() = Some(tmp_path);
+            *self.display_path.get() = (*self.pending_path.get()).clone().unwrap_or_default();
+            (&mut *self.emit.get()).display_path_changed();
+            (&mut *self.emit.get()).has_pending_changed();
         }
     }
     fn save_processed(&self) -> () {
-        let this = self as *const ImageViewer as *mut ImageViewer;
-        unsafe {
-            if let Some(tmp) = (*this).pending_path.clone() {
-                let _ = std::fs::copy(&tmp, &(*this).image_path);
-                let _ = std::fs::remove_file(&tmp);
-                (*this).pending_path = None;
-                (*this).display_path.clear();
-                (*this).emit.image_path_changed();
-                (*this).emit.display_path_changed();
-                (*this).emit.has_pending_changed();
+        // 覆盖原图并清理临时文件；触发多路信号
+        // 注意：先复制/删除，再一次性更新状态，避免部分更新导致的 UI 闪烁
+        let (img_path, tmp_opt) = unsafe { ((*self.image_path.get()).clone(), (*self.pending_path.get()).clone()) };
+        if let Some(tmp) = tmp_opt {
+            let _ = std::fs::copy(&tmp, &img_path);
+            let _ = std::fs::remove_file(&tmp);
+            unsafe {
+                *self.pending_path.get() = None;
+                (*self.display_path.get()).clear();
+                (&mut *self.emit.get()).image_path_changed();
+                (&mut *self.emit.get()).display_path_changed();
+                (&mut *self.emit.get()).has_pending_changed();
             }
         }
     }
     fn refresh_display(&self) -> () {
         // 用原图内容覆盖当前临时显示文件（若存在），保持显示路径不变
-        let this = self as *const ImageViewer as *mut ImageViewer;
+        let (img_path, disp_opt) = unsafe {
+            let img = (*self.image_path.get()).clone();
+            let disp = (*self.display_path.get()).clone();
+            if disp.is_empty() { (img, None) } else { (img, Some(disp)) }
+        };
+        if let Some(disp) = disp_opt { let _ = std::fs::copy(&img_path, &disp); }
         unsafe {
-            let disp_opt = if (&(*this).display_path).is_empty() { None } else { Some((*this).display_path.clone()) };
-            if let Some(disp) = disp_opt {
-                let _ = std::fs::copy(&(*this).image_path, &disp);
-                (*this).emit.display_path_changed();
-            }
-            // 同时触发一次 image_pathChanged 以推动 QML 刷新参数
-            (*this).emit.image_path_changed();
+            (&mut *self.emit.get()).display_path_changed();
+            (&mut *self.emit.get()).image_path_changed();
         }
     }
     fn apply_threshold_mapping(&self, thresholds_json: String) -> () {
@@ -137,10 +145,8 @@ impl ImageViewerTrait for ImageViewer {
             return;
         }
         
-        let this = self as *const ImageViewer as *mut ImageViewer;
-        unsafe {
-            // 总是使用原图作为源文件
-            let original_path = &(*this).image_path;
+        // 总是使用原图作为源文件
+        let original_path = unsafe { &*self.image_path.get() };
             
             if original_path.is_empty() {
                 eprintln!("No original image loaded for threshold mapping");
@@ -228,16 +234,15 @@ impl ImageViewerTrait for ImageViewer {
             }
             
             // 更新显示路径和待保存状态
-            (*this).display_path = temp_path.clone();
-            (*this).pending_path = Some(temp_path);
-            (*this).emit.display_path_changed();
-            (*this).emit.has_pending_changed();
-        }
+            unsafe {
+                *self.display_path.get() = temp_path.clone();
+                *self.pending_path.get() = Some(temp_path);
+                (&mut *self.emit.get()).display_path_changed();
+                (&mut *self.emit.get()).has_pending_changed();
+            }
     }
     fn cleanup_scattered_pixels(&self) -> () {
-        let this = self as *const ImageViewer as *mut ImageViewer;
-        unsafe {
-            let original_path = &(*this).image_path;
+        let original_path = unsafe { &*self.image_path.get() };
             
             if original_path.is_empty() {
                 eprintln!("No original image loaded for cleanup");
@@ -343,76 +348,67 @@ impl ImageViewerTrait for ImageViewer {
             }
             
             // 更新显示路径和待保存状态
-            (*this).display_path = temp_path.clone();
-            (*this).pending_path = Some(temp_path);
-            (*this).emit.display_path_changed();
-            (*this).emit.has_pending_changed();
-        }
+            unsafe {
+                *self.display_path.get() = temp_path.clone();
+                *self.pending_path.get() = Some(temp_path);
+                (&mut *self.emit.get()).display_path_changed();
+                (&mut *self.emit.get()).has_pending_changed();
+            }
     }
     fn cleanup_temp_files(&self) -> () {
-        let this = self as *const ImageViewer as *mut ImageViewer;
-        unsafe {
-            // 清理当前待保存的临时文件
-            if let Some(ref temp_path) = (*this).pending_path {
-                let _ = std::fs::remove_file(temp_path);
-                println!("Cleaned up temporary file: {}", temp_path);
-            }
-            
-            // 清理可能存在的其他临时文件
-            if !(&(*this).image_path).is_empty() {
-                let base_path = std::path::Path::new(&(*this).image_path);
-                if let Some(parent) = base_path.parent() {
-                    if let Some(file_stem) = base_path.file_stem() {
-                        if let Some(extension) = base_path.extension() {
-                            let temp_patterns = [
-                                format!("{}.gray.tmp.png", file_stem.to_string_lossy()),
-                                format!("{}.threshold.tmp.png", file_stem.to_string_lossy()),
-                                format!("{}.cleanup.tmp.png", file_stem.to_string_lossy()),
-                            ];
-                            
-                            for pattern in &temp_patterns {
-                                let temp_path = parent.join(pattern);
-                                if temp_path.exists() {
-                                    let _ = std::fs::remove_file(&temp_path);
-                                    println!("Cleaned up temporary file: {}", temp_path.display());
-                                }
-                            }
-                        }
+        // 清理当前登记的临时文件
+        let pending_snapshot = unsafe { (*self.pending_path.get()).clone() };
+        if let Some(temp_path) = pending_snapshot {
+            let _ = std::fs::remove_file(&temp_path);
+            println!("Cleaned up temporary file: {}", temp_path);
+        }
+        // 扫描并清理同名基底的其他临时变体
+        let image_path_snapshot = unsafe { (*self.image_path.get()).clone() };
+        if !image_path_snapshot.is_empty() {
+            let base_path = std::path::Path::new(&image_path_snapshot);
+            if let Some(parent) = base_path.parent() {
+                if let Some(file_stem) = base_path.file_stem() {
+                    let temp_patterns = [
+                        format!("{}.gray.tmp.png", file_stem.to_string_lossy()),
+                        format!("{}.threshold.tmp.png", file_stem.to_string_lossy()),
+                        format!("{}.cleanup.tmp.png", file_stem.to_string_lossy()),
+                    ];
+                    for pattern in &temp_patterns {
+                        let temp_path = parent.join(pattern);
+                        if temp_path.exists() { let _ = std::fs::remove_file(&temp_path); }
                     }
                 }
             }
         }
     }
     fn start_watcher(&self, path: String) -> () {
-        let this_ptr = self as *const ImageViewer as *mut ImageViewer;
-        unsafe {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let result = notify::recommended_watcher(move |res| { let _ = tx.send(res); });
-            if let Ok(mut w) = result {
-                use notify::{RecursiveMode, EventKind};
-                let _ = w.watch(std::path::Path::new(&path), RecursiveMode::NonRecursive);
-                (*this_ptr).watcher = Some(w);
-                // clone emitter for thread-safe usage
-                let mut emit_clone = (*this_ptr).emit.clone();
-                std::thread::spawn(move || {
-                    let mut last = std::time::Instant::now();
-                    while let Ok(res) = rx.recv() {
-                        if let Ok(event) = res {
-                            match event.kind {
-                                EventKind::Modify(_) | EventKind::Create(_) => {
-                                    if last.elapsed() >= std::time::Duration::from_millis(60) {
-                                        emit_clone.image_path_changed();
-                                        last = std::time::Instant::now();
-                                    }
+        // 启动文件监听，用于感知目标 PNG 文件变化，节流 60ms
+        let (tx, rx) = std::sync::mpsc::channel();
+        let result = notify::recommended_watcher(move |res| { let _ = tx.send(res); });
+        if let Ok(mut w) = result {
+            use notify::{RecursiveMode, EventKind};
+            let _ = w.watch(std::path::Path::new(&path), RecursiveMode::NonRecursive);
+            // 记录 watcher 并克隆一个发射器用于子线程触发 UI 刷新
+            *self.watcher.borrow_mut() = Some(w);
+            let mut emit_clone = unsafe { (&mut *self.emit.get()).clone() };
+            std::thread::spawn(move || {
+                let mut last = std::time::Instant::now();
+                while let Ok(res) = rx.recv() {
+                    if let Ok(event) = res {
+                        match event.kind {
+                            EventKind::Modify(_) | EventKind::Create(_) => {
+                                if last.elapsed() >= std::time::Duration::from_millis(60) {
+                                    emit_clone.image_path_changed();
+                                    last = std::time::Instant::now();
                                 }
-                                _ => {}
                             }
-                        } else {
-                            break;
+                            _ => {}
                         }
-                    }
-                });
-            }
+                    } else { break; }
+                }
+            });
         }
     }
 }
+
+// 注意：所有内部写入均通过 UnsafeCell::get 获得可变指针后在局部 unsafe 作用域内完成。

@@ -1,3 +1,9 @@
+// 说明：
+// 此文件保留了一个独立的 C 接口示例（pp_start_watcher），
+// 用于在非 rust_qt_binding_generator 流程下从 C/C++ 直接调用 Rust 的文件监听。
+// 目前 Qt 主程序已通过生成器产物 (`src/gen/`) 与 Rust 交互，
+// 因此此接口并非主路径，仅作为演示与潜在复用保留。
+
 use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
 
 use anyhow::Result;

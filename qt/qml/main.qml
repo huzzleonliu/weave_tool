@@ -2,6 +2,7 @@ import QtQuick 2.0
 import QtQuick.Window 2.0
 import Qt.labs.platform 1.1 as Labs
 
+// 主窗口：提供缩放、滚动查看 PNG 的能力；底部提供处理与保存按钮
 Window {
     id: win
     width: 960
@@ -13,6 +14,7 @@ Window {
     property string currentPath: typeof argvPath !== 'undefined' ? argvPath : ""
     property int cacheBust: 0
 
+    // 当后端报告 image_path 变化时，更新一次 cacheBust 以强制刷新 Image 源
     Connections {
         target: viewer
         function onImage_pathChanged() { cacheBust = cacheBust + 1 }
@@ -38,7 +40,7 @@ Window {
                 x: width < flick.width ? (flick.width - width) / 2 : 0
                 y: height < flick.height ? (flick.height - height) / 2 : 0
 
-                // 棋盘格背景
+                // 棋盘格背景：便于观察透明像素区域
                 Rectangle {
                     id: checkerboard
                     anchors.fill: parent
@@ -83,6 +85,7 @@ Window {
                     }
                 }
 
+                // 实际展示的图片：优先显示 display_path（临时处理结果），否则显示原图
                 Image {
                     id: img
                     anchors.fill: parent

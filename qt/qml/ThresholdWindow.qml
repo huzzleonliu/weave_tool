@@ -2,6 +2,11 @@ import QtQuick 2.15
 import QtQuick.Window 2.15
 import QtQuick.Controls 2.15
 
+// 阈值配置窗口：
+// - 输入段数并自动生成等距初值
+// - 在单条轨道上拖动多个滑块以设定各段阈值（0..255）
+// - 选择“平均/分段”两种映射模式
+// - 点击“确认映射”后，通过信号将 stops 与模式传回主界面
 Window {
     id: dlg
     width: 520
