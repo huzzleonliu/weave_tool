@@ -1,0 +1,39 @@
+cmake_minimum_required(VERSION 3.16)
+project(picture_process_qt LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+
+# 手动处理Qt
+find_package(Qt5 5.15 COMPONENTS Core Gui Widgets Qml Quick REQUIRED)
+
+# Rust静态库路径
+set(GEN_RS_GEN ${CMAKE_CURRENT_SOURCE_DIR}/../src/gen/target/x86_64-pc-windows-gnu/release/libpicture_process_generated.a)
+
+# 检查Rust静态库是否存在
+if(NOT EXISTS ${GEN_RS_GEN})
+    message(FATAL_ERROR "Rust静态库不存在: ${GEN_RS_GEN}")
+endif()
+
+# 手动添加源文件
+set(SOURCES
+    main.cpp
+    qml.qrc
+)
+
+# 创建可执行文件
+add_executable(picture_process_qt ${SOURCES})
+
+# 手动处理Qt资源
+qt5_add_resources(QML_RCS qml.qrc)
+target_sources(picture_process_qt PRIVATE ${QML_RCS})
+
+# 链接库
+target_link_libraries(picture_process_qt
+    Qt5::Core Qt5::Gui Qt5::Widgets Qt5::Qml Qt5::Quick
+    ${GEN_RS_GEN}
+)
+
+# 设置输出目录
+set_target_properties(picture_process_qt PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
